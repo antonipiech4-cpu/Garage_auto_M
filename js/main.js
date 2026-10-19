@@ -148,13 +148,14 @@
     notice.hidden = enabled;
   };
 
-  // Le formulaire n'est actif que si contact.php répond et que l'envoi est configuré.
-  // Sinon (site ouvert sans PHP, e-mail non renseigné…), il est désactivé et renvoie au téléphone.
-  setFormEnabled(false);
-  fetch('contact.php?etat=1', { headers: { Accept: 'application/json' }, cache: 'no-store' })
-    .then((r) => (r.ok ? r.json() : null))
-    .then((data) => setFormEnabled(Boolean(data && data.configured)))
-    .catch(() => setFormEnabled(false));
+  // Le formulaire n'est actif qu'une fois l'identifiant Formspree renseigné dans l'attribut action (voir README).
+  // Sinon, il est désactivé et renvoie au téléphone.
+  const isConfigured = /^https:\/\/formspree\.io\/f\/[A-Za-z0-9]+$/.test(form.action)
+    && !form.action.includes('VOTRE_ID');
+  setFormEnabled(isConfigured);
+
+  const subjectInput = form.elements.subject;
+  const baseSubject = subjectInput ? subjectInput.value : '';
 
   const messages = {
     nom: { valueMissing: 'Indiquez votre nom.' },
@@ -222,7 +223,18 @@
       return;
     }
 
-    form.elements.t.value = String(Math.round((Date.now() - loadedAt) / 1000));
+    const thanks = 'Merci, votre demande a bien été envoyée. Nous vous rappelons pendant nos heures d\'ouverture.';
+
+    // Anti-robots : champ piège rempli ou envoi en moins de 3 secondes → rien n'est envoyé.
+    if (form.elements._gotcha.value || Date.now() - loadedAt < 3000) {
+      form.reset();
+      setStatus('success', thanks);
+      return;
+    }
+
+    if (subjectInput) {
+      subjectInput.value = `${baseSubject} : ${form.elements.prestation.value} – ${form.elements.nom.value.trim()}`;
+    }
     submitBtn.disabled = true;
     submitBtn.textContent = 'Envoi en cours…';
 
@@ -238,17 +250,22 @@
       });
       const data = await response.json().catch(() => ({}));
 
-      if (response.ok && data.ok) {
+      if (response.ok) {
         form.reset();
-        setStatus('success', 'Merci, votre demande a bien été envoyée. Nous vous rappelons pendant nos heures d\'ouverture.');
-      } else if (data.errors) {
-        Object.entries(data.errors).forEach(([name, text]) => {
-          const field = form.elements[name];
-          if (field) showError(field, text);
-        });
-        setStatus('error', 'Certains champs sont à corriger.');
+        setStatus('success', thanks);
+      } else if (response.status === 429) {
+        setStatus('error', `Trop de demandes en peu de temps. Réessayez dans quelques minutes ou appelez-nous au ${PHONE}.`);
       } else {
-        setStatus('error', `${data.message || 'L\'envoi n\'a pas abouti.'} Vous pouvez nous appeler au ${PHONE}.`);
+        // Formspree renvoie une liste d'erreurs ({ field, message }) : on les rattache aux champs connus.
+        const errors = Array.isArray(data.errors) ? data.errors : [];
+        let fieldErrors = 0;
+        errors.forEach((err) => {
+          const field = err.field && form.elements[err.field];
+          if (field && field.id) { showError(field, 'Valeur à vérifier.'); fieldErrors += 1; }
+        });
+        setStatus('error', fieldErrors
+          ? 'Certains champs sont à corriger.'
+          : `L'envoi n'a pas abouti. Réessayez ou appelez-nous au ${PHONE}.`);
       }
     } catch (err) {
       setStatus('error', `L'envoi n'a pas abouti (connexion interrompue). Réessayez ou appelez-nous au ${PHONE}.`);
